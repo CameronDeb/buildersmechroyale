@@ -750,6 +750,7 @@ export class Brain {
     const laserReady = !!laser && laser.cooldown < 0.35
     const lightReady = !!light && me.energy > 12
     const ready = gunReady || laserReady || (lightReady && dT < 60)
+    const R = (laserReady ? 1 : 0) + (gunReady ? 0.6 : 0) + (lightReady && dT < 50 ? 1 : 0)
     const eFrac = target.hp / Math.max(1, target.maxHp)
     const live = threats.filter((e) => t - e.seen < 4 && hyp(e.pos[0] - P[0], e.pos[1] - P[1]) < 200)
     let aggr = clamp(hpFrac * 1.25 - 0.3 + (1 - eFrac) * 0.5 - 0.2 * (live.length - 1) + (this.me.cubes || 0) * 0.02, 0, 1)
@@ -788,7 +789,7 @@ export class Brain {
         let wgt = 1
         if (e.weapons.includes("laser")) wgt += 0.8
         if (e.weapons.includes("lightning") && de < 50) wgt += 1.2
-        if (e.charging) wgt += 1.5
+        if (e.charging) wgt += t - e.chargeSince > 0.35 ? env("CHW", 5) : 1.5
         wgt *= 0.4 + 0.6 * (e.hp / Math.max(1, e.maxHp))
         if (de > 230) wgt *= 0.3
         if (this.exposedTo(e, x, y, z)) expo += wgt
@@ -796,13 +797,22 @@ export class Brain {
       const canHit = this.canHitFrom(x, y, z, tx, ty, tz)
       const dTx = hyp(tx - x, ty - y)
       if (ready && aggr > 0.35) {
-        if (canHit) s += 10 + 8 * aggr
-        s -= expo * (2 + (1 - aggr) * 8)
+        if (canHit) s += 6 + 10 * Math.min(1.6, R) * aggr
+        s -= expo * (2 + (1 - aggr) * 8 + (R < 0.7 ? 5 : 0))
         s -= Math.abs(dTx - pref) * 0.07 * (0.5 + aggr)
       } else {
         s -= expo * 12
         if (canHit && expo === 0) s += 2
         s += Math.min(dTx, 120) * 0.04
+      }
+      // keep every shooter inside the front arc
+      if (live.length > 1) {
+        const yT = Math.atan2(ty - y, tx - x)
+        for (const e of live) {
+          if (e === target) continue
+          const off = Math.abs(wrap(Math.atan2(e.pos[1] - y, e.pos[0] - x) - yT))
+          if (off > 1.4 && this.exposedTo(e, x, y, z)) s -= (off - 1.4) * env("ARC", 6)
+        }
       }
       // spacing from secondary threats
       for (const e of live) {
@@ -1005,7 +1015,7 @@ export class Brain {
         const onTarget = angErr(laserAim) < tol
         if ((nearFull && los && onTarget) || forced) fire[laserI] = false
         else fire[laserI] = true
-      } else if (laser.cooldown <= 0.05 && los && dist < laser.stats.range * 0.97) {
+      } else if (laser.cooldown <= 0.05 && dist < laser.stats.range * 0.97 && (los || (shootAt.isMech && shootAt.e && t - shootAt.e.seen < 2.5 && env("PRECHARGE", 0) > 0))) {
         fire[laserI] = true
       }
     }
