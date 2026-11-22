@@ -975,11 +975,12 @@ export class Brain {
     let px = -uy * this.jinkSign, py = ux * this.jinkSign
     if (!w.lineWalkable(P[0], P[1], P[0] + px * 6, P[1] + py * 6)) { this.jinkSign = -this.jinkSign; px = -px; py = -py }
     const k = clamp((dT - pref) / 25, -1, 1)
-    let mx = ux * k * 0.7 + px * 0.8, my = uy * k * 0.7 + py * 0.8
+    const jk = env("JINK", 0.8), rk = env("RADIAL", 0.7)
+    let mx = ux * k * rk + px * jk, my = uy * k * rk + py * jk
     const l = hyp(mx, my)
     if (l > 1) { mx /= l; my /= l }
     if (this.zoneMargin(P[0] + mx * 10, P[1] + my * 10, t + 5) < 3) { const sp = this.zoneSafePoint(); return { move: this.followTo(sp[0], sp[1], 3), boost: true } }
-    return { move: [mx, my], boost: this.me.energy > 45 }
+    return { move: [mx, my], boost: this.me.energy > env("DUEL_BOOST", 45) }
   }
 
   retreatSpot(live: Enemy[]): [number, number] | null {
