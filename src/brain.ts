@@ -782,8 +782,8 @@ export class Brain {
     const theyL = target.weapons.includes("lightning")
     if (hasL && this.me.energy > 20 && hpFrac > 0.4) return 22
     if (theyL && !hasL) return 75
-    if (hasLaser) return 85
-    return 55
+    if (hasLaser) return env("PREF_LASER", 85)
+    return env("PREF_GUN", 55)
   }
 
   fightMove(target: Enemy, threats: Enemy[], hpFrac: number): { move: [number, number]; boost: boolean } {
@@ -858,6 +858,14 @@ export class Brain {
           if (e === target) continue
           const off = Math.abs(wrap(Math.atan2(e.pos[1] - y, e.pos[0] - x) - yT))
           if (off > 1.4 && this.exposedTo(e, x, y, z)) s -= (off - 1.4) * env("ARC", 6)
+        }
+      }
+      // stay out of arc range of lightning carriers unless we brawl too
+      if (!light || hpFrac < 0.4) {
+        for (const e of live) {
+          if (!e.weapons.includes("lightning")) continue
+          const de = hyp(e.pos[0] - x, e.pos[1] - y)
+          if (de < 50) s -= (50 - de) * env("LKITE", 4)
         }
       }
       // spacing from secondary threats
