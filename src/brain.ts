@@ -26,7 +26,7 @@ const env = (k: string, d: number) => {
   const v = typeof process !== "undefined" ? process.env["MB_" + k] : undefined
   return v === undefined || v === "" ? d : +v
 }
-const MODE = typeof process !== "undefined" ? process.env.MB_MODE || "" : ""
+const MODE = typeof process !== "undefined" ? process.env.MB_MODE || "duel" : "duel"
 const WEAPON_VALUE: Record<string, number> = { laser: 10, lightning: env("LIGHT", 8), gun: env("GUN", 9), mortar: env("MORT", 4) }
 
 const UPGRADE_ORDER = [
