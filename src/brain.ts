@@ -824,8 +824,8 @@ export class Brain {
     const theyL = target.weapons.includes("lightning")
     if (hasL && this.me.energy > 20 && hpFrac > 0.4) return 22
     if (theyL && !hasL) return 75
-    if (hasLaser) return env("PREF_LASER", 85)
-    return env("PREF_GUN", 55)
+    if (hasLaser) return env("PREF_LASER", 50)
+    return env("PREF_GUN", 35)
   }
 
   fightMove(target: Enemy, threats: Enemy[], hpFrac: number): { move: [number, number]; boost: boolean } {
