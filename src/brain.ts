@@ -369,10 +369,12 @@ export class Brain {
 
     const zoneUrgent = this.zoneUrgency()
 
+    const grab = this.worstSlotValue() < 5 ? this.nearWeapon(env("GRAB_R", 45)) : null
     if (fighting && target) {
       this.mode = "fight"
       const tf = performance.now()
-      const r = this.fightMove(target, threats, hpFrac)
+      const r = grab ? { move: this.followTo(grab[0], grab[1], 0.5), boost: me.energy > 20 } : this.fightMove(target, threats, hpFrac)
+      if (grab) this.mode = "fight-grab"
       this.pt("fight", tf)
       move = r.move
       boost = r.boost
@@ -535,7 +537,7 @@ export class Brain {
       if (c.pos[2] - this.w.groundAt(c.pos[0], c.pos[1]) > 3) continue
       const cz = c.pos[2] + 1.2
       const los = d < 150 && this.canHitFrom(P[0], P[1], P[2], c.pos[0], c.pos[1], cz)
-      const s = env("W_CRATE", 28) - d * 0.15 - danger(c.pos[0], c.pos[1]) * 20
+      const s = env("W_CRATE", 28) + (this.worstSlotValue() < 5 ? env("W_CRATE_EARLY", 8) : 0) - d * 0.15 - danger(c.pos[0], c.pos[1]) * 20
       opts.push({
         s, label: "crate", goal: los && d < 60 ? [P[0], P[1]] : [c.pos[0], c.pos[1]], stopDist: los ? 0 : 20,
         shoot: los ? { pos: [c.pos[0], c.pos[1], cz], vel: [0, 0, 0], r: 1.3, isMech: false } : undefined,
@@ -646,8 +648,28 @@ export class Brain {
   exploreGoal: [number, number] | null = null
   exploreAt = -99
 
+  nearWeapon(maxD: number): [number, number] | null {
+    const P = this.P, t = this.t
+    let best: [number, number] | null = null, bd = maxD
+    for (const p of this.pickups.values()) {
+      const v = WEAPON_VALUE[p.kind || ""] ?? 0
+      if (v < 7.9 || this.slotOf(p.kind || "") >= 0) continue
+      const bad = this.badPickups.get(p.id)
+      if (bad !== undefined && t - bad < 8) continue
+      if (p.pos[2] - this.w.groundAt(p.pos[0], p.pos[1]) > 3) continue
+      const d = hyp(p.pos[0] - P[0], p.pos[1] - P[1])
+      if (d < bd) { bd = d; best = [p.pos[0], p.pos[1]] }
+    }
+    return best
+  }
+
   scanLook(): V3 {
     const P = this.P, t = this.t
+    // full turn at the start to spot loot
+    if (t < 1.8 && env("SPIN", 0) > 0) {
+      const a = this.me.aim[0] + 1.4
+      return [P[0] + Math.cos(a) * 50, P[1] + Math.sin(a) * 50, P[2] + 6]
+    }
     // look toward the freshest contact, otherwise sweep
     let bc: any = null
     for (const c of this.contacts) if (!bc || c.t > bc.t) bc = c
