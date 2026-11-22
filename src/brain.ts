@@ -68,6 +68,7 @@ export class Brain {
   badCrates = new Set<number>()
   badPickups = new Map<number, number>()
   contacts: { x: number; y: number; t: number; kind: string; w: number }[] = []
+  ghosts = new Map<number, { x: number; y: number; t: number; weapon: string; bearing: number; dmg: number }>()
   lastHurt = -99
   lastHurtBy = -1
   lastDealt = -99
@@ -93,6 +94,10 @@ export class Brain {
   mode = ""
   dropGoal: number | null = null
   lastPathCost = 0
+  curTarget = -1
+  curTargetAt = -99
+  prof: Record<string, number> = {}
+  pt(k: string, t0: number) { this.prof[k] = (this.prof[k] || 0) + performance.now() - t0 }
 
   constructor(hello: any) {
     this.cfg = hello.config
@@ -172,7 +177,10 @@ export class Brain {
 
     if (obs.offer) act.pick = this.pickUpgrade(obs.offer)
 
+    let t1 = performance.now()
+    this.pt("ingest", t0)
     const plan = this.decide(obs)
+    this.pt("decide", t1)
     act.move = plan.move
     act.boost = plan.boost
     if (plan.jump) act.jump = true
@@ -186,7 +194,8 @@ export class Brain {
     this.lastMoveCmd = plan.move
     this.aimCmd = plan.aim
     const ms = performance.now() - t0
-    if (ms > 30) console.error(`slow tick ${obs.tick}: ${ms.toFixed(1)}ms`)
+    if (ms > 30) console.error(`slow tick ${obs.tick}: ${ms.toFixed(1)}ms ${this.mode} ${JSON.stringify(this.prof)}`)
+    this.prof = {}
     return act
   }
 
@@ -232,7 +241,12 @@ export class Brain {
           if (ev.bearing !== null) this.hurtBearing = ev.bearing
           const e = this.enemies.get(ev.by)
           if (e) e.dmgToMe += ev.amount
-          else if (ev.by < 100 && ev.bearing !== null) {
+          if ((!e || e.seen !== t) && ev.by < 100 && ev.bearing !== null) {
+            const gd = ev.weapon === "lightning" ? 30 : ev.weapon === "laser" ? 110 : ev.weapon === "mortar" ? 120 : 90
+            const gx = this.P[0] + Math.cos(ev.bearing) * gd, gy = this.P[1] + Math.sin(ev.bearing) * gd
+            this.ghosts.set(ev.by, { x: gx, y: gy, t, weapon: ev.weapon, bearing: ev.bearing, dmg: ev.amount + (this.ghosts.get(ev.by)?.dmg ?? 0) * 0.5 })
+          }
+          if (!e && ev.by < 100 && ev.bearing !== null) {
             const d = ev.weapon === "lightning" ? 35 : ev.weapon === "laser" ? 120 : 90
             this.contacts.push({ x: this.P[0] + Math.cos(ev.bearing) * d, y: this.P[1] + Math.sin(ev.bearing) * d, t, kind: "hit", w: 3 })
           }
@@ -301,18 +315,37 @@ export class Brain {
     // threats we currently know about
     const threats: Enemy[] = []
     for (const e of this.enemies.values()) if (t - e.seen < 6) threats.push(e)
+    let ghostLook: V3 | null = null
+    for (const [id, g] of this.ghosts) {
+      if (t - g.t > 4) { this.ghosts.delete(id); continue }
+      const known = this.enemies.get(id)
+      if (known && known.seen > g.t) continue
+      const gz = this.w.surfAt(g.x, g.y)
+      threats.push({ id: 1000 + id, pos: [g.x, g.y, gz], vel: [0, 0, 0], aim: [g.bearing + Math.PI, 0], hp: 1400, maxHp: 1400, cubes: 0,
+        weapons: [g.weapon], charging: false, chargeSince: -1, seen: g.t, firstSeen: g.t, dmgToMe: g.dmg, ghost: true } as any)
+      if (t - g.t < 1.2 && (!ghostLook || g.dmg > 60)) ghostLook = [g.x, g.y, gz + 5]
+    }
     const dist = (e: { pos: V3 }) => hyp(e.pos[0] - P[0], e.pos[1] - P[1])
 
     let target: Enemy | null = null
     let tScore = -1e9
     for (const e of threats) {
+      if ((e as any).ghost) continue
       const d = dist(e)
       if (d > 260) continue
       const fresh = t - e.seen < 0.15
-      const s = -d * 0.5 - (e.hp / 14) + (fresh ? 40 : 0) + (e.id === this.lastHurtBy && t - this.lastHurt < 3 ? 25 : 0) + e.dmgToMe * 0.05
+      const sticky = e.id === this.curTarget && t - this.curTargetAt < 1.5 ? 45 + (1 - e.hp / Math.max(1, e.maxHp)) * 30 : 0
+      const s = -d * 0.5 - (e.hp / 14) + (fresh ? 40 : 0) + (e.id === this.lastHurtBy && t - this.lastHurt < 3 ? 25 : 0) + e.dmgToMe * 0.1 + sticky
       if (s > tScore) { tScore = s; target = e }
     }
 
+    if (target) { this.curTarget = target.id; this.curTargetAt = t }
+    // shot by someone we can't see: treat their rough position as the target and turn to it
+    if (ghostLook && (!target || t - target.seen > 0.3 || target.hp > 250)) {
+      let gt: Enemy | null = null
+      for (const e of threats) if ((e as any).ghost && (!gt || e.dmgToMe > gt.dmgToMe)) gt = e
+      if (gt && (!target || t - target.seen > 0.3)) target = gt
+    }
     const fighting = !!target && (dist(target) < 230 || t - this.lastHurt < 4)
     let move: [number, number] = [0, 0]
     let boost = false
@@ -331,18 +364,28 @@ export class Brain {
 
     if (fighting && target) {
       this.mode = "fight"
+      const tf = performance.now()
       const r = this.fightMove(target, threats, hpFrac)
+      this.pt("fight", tf)
       move = r.move
       boost = r.boost
       lookAt = [target.pos[0], target.pos[1], this.centerOf(target)]
-      shootAt = { pos: [target.pos[0], target.pos[1], this.centerOf(target)], vel: target.vel, r: 2.5 * (1 + 0.05 * target.cubes), isMech: true, e: target }
+      if (!(target as any).ghost) shootAt = { pos: [target.pos[0], target.pos[1], this.centerOf(target)], vel: target.vel, r: 2.5 * (1 + 0.05 * target.cubes), isMech: true, e: target }
+      if (ghostLook && shootAt && t - this.lastHurt < 0.6 && target.hp > 250) {
+        // getting hit from outside our view: look first, the front arc halves nothing but the rear adds 50%
+        const gy = Math.atan2(ghostLook[1] - P[1], ghostLook[0] - P[0])
+        const ty = Math.atan2(target.pos[1] - P[1], target.pos[0] - P[0])
+        if (Math.abs(wrap(gy - ty)) > 1.0) { shootAt = null; lookAt = ghostLook }
+      }
       if (zoneUrgent > 0.6) {
         const zm = this.zoneMove()
         if (zm) { move = zm; boost = me.energy > 20 }
       }
     } else {
       this.fightGoal = null
+      const tg = performance.now()
       const g = this.chooseGoal(threats)
+      this.pt("goal", tg)
       this.mode = g.label
       if (g.goal) {
         move = this.followTo(g.goal[0], g.goal[1], g.stopDist ?? 2)
@@ -353,7 +396,9 @@ export class Brain {
     }
 
     // dodge incoming shells / bullets
+    const td = performance.now()
     const dodge = this.dodgeVector(obs)
+    this.pt("dodge", td)
     if (dodge) {
       move = [move[0] * 0.4 + dodge[0], move[1] * 0.4 + dodge[1]]
       const l = hyp(move[0], move[1])
@@ -652,7 +697,9 @@ export class Brain {
       hyp(gx - this.routeGoal[0], gy - this.routeGoal[1]) > 10 ||
       t - this.routeAt > 2.5
     if (needPlan) {
+      const t0 = performance.now()
       const r = w.path(P[0], P[1], gx, gy, 25000)
+      this.pt("path", t0)
       this.route = r
       this.routeGoal = [gx, gy]
       this.routeAt = t
@@ -717,7 +764,9 @@ export class Brain {
 
     let best = cands[0], bs = -1e9
     const myZ0 = P[2]
+    const tStart = performance.now()
     for (let ci = 0; ci < cands.length; ci++) {
+      if (ci > 12 && performance.now() - tStart > 12) break
       const [x, y] = cands[ci]
       const isHere = ci === 0
       if (!isHere) {
