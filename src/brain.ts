@@ -975,7 +975,7 @@ export class Brain {
     let px = -uy * this.jinkSign, py = ux * this.jinkSign
     if (!w.lineWalkable(P[0], P[1], P[0] + px * 6, P[1] + py * 6)) { this.jinkSign = -this.jinkSign; px = -px; py = -py }
     const k = clamp((dT - pref) / 25, -1, 1)
-    const jk = env("JINK", 0.8), rk = env("RADIAL", 0.7)
+    const jk = env("JINK", 0.4), rk = env("RADIAL", 0.7)
     let mx = ux * k * rk + px * jk, my = uy * k * rk + py * jk
     const l = hyp(mx, my)
     if (l > 1) { mx /= l; my /= l }
