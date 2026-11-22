@@ -26,6 +26,7 @@ const env = (k: string, d: number) => {
   const v = typeof process !== "undefined" ? process.env["MB_" + k] : undefined
   return v === undefined || v === "" ? d : +v
 }
+const MODE = typeof process !== "undefined" ? process.env.MB_MODE || "" : ""
 const WEAPON_VALUE: Record<string, number> = { laser: 10, lightning: env("LIGHT", 8), gun: env("GUN", 9), mortar: env("MORT", 4) }
 
 const UPGRADE_ORDER = [
@@ -186,7 +187,7 @@ export class Brain {
 
     let t1 = performance.now()
     this.pt("ingest", t0)
-    const plan = this.decide(obs)
+    const plan = MODE === "hide" ? this.decideHide(obs) : this.decide(obs)
     this.pt("decide", t1)
     act.move = plan.move
     act.boost = plan.boost
@@ -312,6 +313,47 @@ export class Brain {
   }
 
   // ---------------- decisions ----------------
+
+  // probe mode: never shoot, stay quiet and out of sight
+  decideHide(obs: any) {
+    const me = this.me, P = this.P, t = this.t
+    const threats: Enemy[] = []
+    for (const e of this.enemies.values()) if (t - e.seen < 10) threats.push(e)
+    for (const [id, g] of this.ghosts) if (t - g.t < 6) threats.push({ id: 1000 + id, pos: [g.x, g.y, this.w.surfAt(g.x, g.y)], cubes: 0 } as any)
+    let move: [number, number] = [0, 0], boost = false, jump = false
+    const zu = this.zoneUrgency()
+    const near = threats.some((e) => hyp(e.pos[0] - P[0], e.pos[1] - P[1]) < 130)
+    if (zu >= 0.7) {
+      const sp = this.zoneSafePoint()
+      move = this.followTo(sp[0], sp[1], 3)
+      boost = zu >= 1 || near
+      this.mode = "zone"
+    } else if (threats.length) {
+      const spot = this.retreatSpot(threats)
+      if (spot) move = this.followTo(spot[0], spot[1], 2)
+      boost = near && me.energy > 10
+      this.mode = "hide-run"
+    } else {
+      const sp = this.zoneSafePoint()
+      const d = hyp(sp[0] - P[0], sp[1] - P[1])
+      if (d > 40) move = this.followTo(sp[0], sp[1], 3)
+      this.mode = "hide-wait"
+    }
+    if (!boost) { const l = hyp(move[0], move[1]); if (l > 0.4) move = [move[0] / l * 0.4, move[1] / l * 0.4] }
+    if (t < this.climbUntil && P[2] < this.climbH + 0.6) { if (me.grounded) jump = true; else boost = me.energy > 2 }
+    const moving = hyp(move[0], move[1]) > 0.2
+    if (t < this.unstickUntil) { move = [Math.cos(this.unstickDir), Math.sin(this.unstickDir)]; jump = me.grounded; boost = !me.grounded && me.energy > 5 }
+    else if (moving && hyp(me.vel[0], me.vel[1]) < 1 && me.grounded) {
+      this.stuckTimer += 0.1
+      if (this.stuckTimer > 1.5) { this.stuckTimer = 0; this.unstickUntil = t + 0.8; this.unstickDir = Math.atan2(move[1], move[0]) + (this.rand() - 0.5) * 2.2; this.route = null }
+    } else this.stuckTimer = Math.max(0, this.stuckTimer - 0.05)
+    let look: V3 = this.scanLook()
+    let nearest: Enemy | null = null
+    for (const e of threats) if (!nearest || hyp(e.pos[0] - P[0], e.pos[1] - P[1]) < hyp(nearest.pos[0] - P[0], nearest.pos[1] - P[1])) nearest = e
+    if (nearest) look = [nearest.pos[0], nearest.pos[1], nearest.pos[2] + 5]
+    const yaw = Math.atan2(look[1] - P[1], look[0] - P[0])
+    return { move, boost, jump, aim: [yaw, 0] as [number, number], fire: [false, false], reload: false, take: undefined, drop: undefined }
+  }
 
   decide(obs: any) {
     const me = this.me
