@@ -101,6 +101,7 @@ export class Brain {
   curTarget = -1
   curTargetAt = -99
   prof: Record<string, number> = {}
+  lastProf: Record<string, number> = {}
   pt(k: string, t0: number) { this.prof[k] = (this.prof[k] || 0) + performance.now() - t0 }
 
   constructor(hello: any) {
@@ -199,7 +200,7 @@ export class Brain {
     this.aimCmd = plan.aim
     const ms = performance.now() - t0
     if (ms > 30) console.error(`slow tick ${obs.tick}: ${ms.toFixed(1)}ms ${this.mode} ${JSON.stringify(this.prof)}`)
-    this.prof = {}
+    this.lastProf = this.prof; this.prof = {}
     return act
   }
 
@@ -517,7 +518,7 @@ export class Brain {
       const d = near(c.pos)
       if (d > 220 || !inZoneLater(c.pos[0], c.pos[1])) continue
       if (c.pos[2] - this.w.groundAt(c.pos[0], c.pos[1]) > 3) continue
-      opts.push({ s: 40 - d * 0.18 - danger(c.pos[0], c.pos[1]) * 20, label: "cube", goal: [c.pos[0], c.pos[1]], stopDist: 0.3 })
+      opts.push({ s: env("W_CUBE", 40) - d * 0.18 - danger(c.pos[0], c.pos[1]) * 20, label: "cube", goal: [c.pos[0], c.pos[1]], stopDist: 0.3 })
     }
     // crates: shoot from range, walk to the cube afterwards
     for (const c of this.crates.values()) {
@@ -527,14 +528,14 @@ export class Brain {
       if (c.pos[2] - this.w.groundAt(c.pos[0], c.pos[1]) > 3) continue
       const cz = c.pos[2] + 1.2
       const los = d < 150 && this.canHitFrom(P[0], P[1], P[2], c.pos[0], c.pos[1], cz)
-      const s = 28 - d * 0.15 - danger(c.pos[0], c.pos[1]) * 20
+      const s = env("W_CRATE", 28) - d * 0.15 - danger(c.pos[0], c.pos[1]) * 20
       opts.push({
         s, label: "crate", goal: los && d < 60 ? [P[0], P[1]] : [c.pos[0], c.pos[1]], stopDist: los ? 0 : 20,
         shoot: los ? { pos: [c.pos[0], c.pos[1], cz], vel: [0, 0, 0], r: 1.3, isMech: false } : undefined,
       })
     }
     // npc drones: worth 2 cubes, only when healthy
-    if (hpFrac > 0.55) {
+    if (hpFrac > env("NPC_HP", 0.55)) {
       for (const n of this.npcs.values()) {
         if (t - n.seen > 3) continue
         const d = near(n.pos)
@@ -546,7 +547,7 @@ export class Brain {
         const want = this.weapon("lightning") && me.energy > 30 ? 30 : 55
         if (d > 1) { gx = n.pos[0] + ((P[0] - n.pos[0]) / d) * want; gy = n.pos[1] + ((P[1] - n.pos[1]) / d) * want }
         opts.push({
-          s: 30 - d * 0.15 + (n.hp < n.maxHp ? 6 : 0) - danger(n.pos[0], n.pos[1]) * 20 - (1 - hpFrac) * 20,
+          s: env("W_NPC", 30) - d * 0.15 + (n.hp < n.maxHp ? 6 : 0) - danger(n.pos[0], n.pos[1]) * 20 - (1 - hpFrac) * 20,
           label: "npc", goal: [gx, gy], stopDist: 4,
           shoot: los ? { pos: [n.pos[0], n.pos[1], cz], vel: n.vel, r: 1.8, isMech: false } : undefined,
           look: [n.pos[0], n.pos[1], cz],
@@ -560,7 +561,7 @@ export class Brain {
       if (eta + 2 < dr.lands_in - 6) continue
       if (dr.holder !== null && dr.holder !== this.me.id) continue
       const dg = danger(dr.pos[0], dr.pos[1])
-      opts.push({ s: 45 - d * 0.12 - dg * 30 + (1 - hpFrac) * 15, label: "drop", goal: [dr.pos[0], dr.pos[1]], stopDist: 0.5 })
+      opts.push({ s: env("W_DROP", 45) - d * 0.12 - dg * 30 + (1 - hpFrac) * 15, label: "drop", goal: [dr.pos[0], dr.pos[1]], stopDist: 0.5 })
     }
 
     // regroup: when hurt, sit somewhere hidden from recent contacts
@@ -983,8 +984,17 @@ export class Brain {
     let lx = sx, ly = sy, lz = sz
     {
       let tt = hyp(sx - P[0], sy - P[1], sz - mz) / gs
+      // airborne targets follow a ballistic arc unless they jet; stop at the ground
+      const tgtFeet = sz - (shootAt.isMech ? 4.5 : 1.5)
+      const airborne = Math.abs(vel[2]) > 0.3 || tgtFeet - this.w.surfAt(sx, sy) > 0.8
+      const g = this.cfg.mech.gravity
       for (let k = 0; k < 3; k++) {
-        lx = sx + vel[0] * tt; ly = sy + vel[1] * tt; lz = sz + clamp(vel[2], -6, 6) * tt * 0.5
+        lx = sx + vel[0] * tt; ly = sy + vel[1] * tt
+        lz = airborne ? sz + vel[2] * tt - 0.5 * g * tt * tt * 0.7 : sz
+        if (airborne) {
+          const floor = this.w.surfAt(lx, ly) + (sz - tgtFeet)
+          if (lz < floor) lz = floor
+        }
         tt = hyp(lx - P[0], ly - P[1], lz - mz) / gs + 0.05
       }
     }
