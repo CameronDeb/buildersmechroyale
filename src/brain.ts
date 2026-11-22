@@ -22,7 +22,11 @@ function rng(seed: number) {
   }
 }
 
-const WEAPON_VALUE: Record<string, number> = { laser: 10, lightning: 8, gun: 7.5, mortar: 4 }
+const env = (k: string, d: number) => {
+  const v = typeof process !== "undefined" ? process.env["MB_" + k] : undefined
+  return v === undefined || v === "" ? d : +v
+}
+const WEAPON_VALUE: Record<string, number> = { laser: 10, lightning: env("LIGHT", 8), gun: env("GUN", 9), mortar: env("MORT", 4) }
 
 const UPGRADE_ORDER = [
   "plating", "armor", "laser_damage", "laser_charge", "gun_damage", "nanites", "gun_rate",
@@ -762,7 +766,7 @@ export class Brain {
     }
     if (this.fightGoal && t - this.fightGoalAt < 3) cands.push(this.fightGoal)
 
-    let best = cands[0], bs = -1e9
+    let best = cands[0], bs = -1e9, bestExpo = 0
     const myZ0 = P[2]
     const tStart = performance.now()
     for (let ci = 0; ci < cands.length; ci++) {
@@ -808,7 +812,16 @@ export class Brain {
       }
       if (light && dTx < 40 && canHit) s += 4
       if (this.fightGoal && hyp(x - this.fightGoal[0], y - this.fightGoal[1]) < 3) s += 1.5
-      if (s > bs) { bs = s; best = [x, y] }
+      if (s > bs) { bs = s; best = [x, y]; bestExpo = expo }
+    }
+    // losing and nowhere close to hide: run to a spot out of everyone's sight
+    if (aggr < env("RETREAT", 0.05) && bestExpo > 0 && live.length) {
+      const spot = this.retreatSpot(live)
+      if (spot) {
+        this.fightGoal = null
+        const mv = this.followTo(spot[0], spot[1], 2)
+        return { move: mv, boost: me.energy > 8 }
+      }
     }
     this.fightGoal = best
     this.fightGoalAt = t
@@ -837,6 +850,41 @@ export class Brain {
     const boost = (exposedNow && me.energy > 35) || (ml > 8 && me.energy > 30) || (aggr < 0.2 && me.energy > 10)
     return { move, boost }
   }
+
+  retreatSpot(live: Enemy[]): [number, number] | null {
+    const P = this.P, t = this.t, w = this.w
+    if (this.retreat && t - this.retreatAt < 1.5) {
+      const [x, y] = this.retreat
+      if (hyp(x - P[0], y - P[1]) > 3) return this.retreat
+    }
+    let cx = 0, cy = 0
+    for (const e of live) { cx += e.pos[0]; cy += e.pos[1] }
+    cx /= live.length; cy /= live.length
+    let best: [number, number] | null = null, bs = -1e9
+    const t0 = performance.now()
+    for (const r of [30, 45, 65]) {
+      for (let k = 0; k < 16; k++) {
+        if (performance.now() - t0 > 8) break
+        const a = (k / 16) * TAU
+        const x = P[0] + Math.cos(a) * r, y = P[1] + Math.sin(a) * r
+        if (!w.standableAt(x, y)) continue
+        if (this.zoneMargin(x, y, t + 12) < 6) continue
+        const z = w.surfAt(x, y)
+        let seen = false
+        for (const e of live) if (this.exposedTo(e, x, y, z)) { seen = true; break }
+        if (seen) continue
+        // moving toward the enemy to get there is bad
+        const toward = ((x - P[0]) * (cx - P[0]) + (y - P[1]) * (cy - P[1])) / (r * (hyp(cx - P[0], cy - P[1]) || 1))
+        const s = -r * 0.5 - toward * 25 + Math.min(hyp(x - cx, y - cy), 150) * 0.15
+        if (s > bs) { bs = s; best = [x, y] }
+      }
+    }
+    this.retreat = best
+    this.retreatAt = t
+    return best
+  }
+  retreat: [number, number] | null = null
+  retreatAt = -99
 
   dodgeVector(obs: any): [number, number] | null {
     const P = this.P
