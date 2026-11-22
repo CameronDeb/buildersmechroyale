@@ -844,6 +844,7 @@ export class Brain {
     if (hpFrac < 0.3 && eFrac > hpFrac + 0.1) aggr = 0
     const pref = this.preferredRange(target)
 
+    if (MODE === "duel") return this.duelMove(target, dT, pref)
     const zoneT = t + 6
     const cands: [number, number][] = [[P[0], P[1]]]
     for (const r of [5, 10, 17, 26]) {
@@ -961,6 +962,24 @@ export class Brain {
     }
     const boost = (exposedNow && me.energy > 35) || (ml > 8 && me.energy > 30) || (aggr < 0.2 && me.energy > 10)
     return { move, boost }
+  }
+
+  // plain stand-and-fight: hold range, strafe, never hide
+  duelMove(target: Enemy, dT: number, pref: number): { move: [number, number]; boost: boolean } {
+    const P = this.P, t = this.t, w = this.w
+    const tx = target.pos[0], ty = target.pos[1]
+    const ux = (tx - P[0]) / Math.max(1, dT), uy = (ty - P[1]) / Math.max(1, dT)
+    const los = this.canHitFrom(P[0], P[1], P[2], tx, ty, this.centerOf(target))
+    if (!los) return { move: this.followTo(tx, ty, 8), boost: this.me.energy > 40 }
+    if (t > this.jinkNext) { this.jinkSign = -this.jinkSign; this.jinkNext = t + 0.4 + this.rand() * 0.7 }
+    let px = -uy * this.jinkSign, py = ux * this.jinkSign
+    if (!w.lineWalkable(P[0], P[1], P[0] + px * 6, P[1] + py * 6)) { this.jinkSign = -this.jinkSign; px = -px; py = -py }
+    const k = clamp((dT - pref) / 25, -1, 1)
+    let mx = ux * k * 0.7 + px * 0.8, my = uy * k * 0.7 + py * 0.8
+    const l = hyp(mx, my)
+    if (l > 1) { mx /= l; my /= l }
+    if (this.zoneMargin(P[0] + mx * 10, P[1] + my * 10, t + 5) < 3) { const sp = this.zoneSafePoint(); return { move: this.followTo(sp[0], sp[1], 3), boost: true } }
+    return { move: [mx, my], boost: this.me.energy > 45 }
   }
 
   retreatSpot(live: Enemy[]): [number, number] | null {
