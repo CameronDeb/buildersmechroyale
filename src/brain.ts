@@ -98,6 +98,8 @@ export class Brain {
   mode = ""
   dropGoal: number | null = null
   lastPathCost = 0
+  climbH = 0
+  climbUntil = -1
   curTarget = -1
   curTargetAt = -99
   prof: Record<string, number> = {}
@@ -411,6 +413,11 @@ export class Brain {
       if (me.energy > 15) boost = true
     }
 
+    if (t < this.climbUntil && P[2] < this.climbH + 0.6) {
+      if (me.grounded) jump = true
+      else boost = me.energy > 2
+      this.stuckTimer = 0
+    }
     // stuck handling
     const moving = hyp(move[0], move[1]) > 0.3
     const sp = hyp(me.vel[0], me.vel[1])
@@ -433,7 +440,7 @@ export class Brain {
     const fc = this.fireControl(shootAt, lookAt, move)
     if (fc.reload) reload = true
 
-    if (me.energy < 25 && !dodge && zoneUrgent < 0.6) boost = false
+    if (me.energy < 25 && !dodge && zoneUrgent < 0.6 && !(t < this.climbUntil)) boost = false
     return { move, boost, jump, aim: fc.aim, fire: fc.fire, reload, take, drop }
   }
 
@@ -720,6 +727,21 @@ export class Brain {
     }
     if (bd > 12) { this.route = null }
     this.routeIdx = bi
+    // a climb coming up on the route: head at it and jet
+    for (let i = bi + 1; i < Math.min(r.length, bi + 5); i++) {
+      const h = w.navH[r[i]]
+      if (h - Math.max(P[2], w.navH[r[i - 1]]) > 1.1) {
+        const cx = w.cellX(r[i]), cy = w.cellY(r[i])
+        const dc = hyp(cx - P[0], cy - P[1])
+        if (dc < 9) {
+          this.climbH = h
+          this.climbUntil = t + 0.4
+          if (dc < 0.5) return [0, 0]
+          return [(cx - P[0]) / dc, (cy - P[1]) / dc]
+        }
+        break
+      }
+    }
     let tgt = Math.min(r.length - 1, bi + 1)
     for (let i = Math.min(r.length - 1, bi + 14); i > bi; i--) {
       if (w.lineWalkable(P[0], P[1], w.cellX(r[i]), w.cellY(r[i]))) { tgt = i; break }
@@ -768,7 +790,7 @@ export class Brain {
     }
     if (this.fightGoal && t - this.fightGoalAt < 3) cands.push(this.fightGoal)
 
-    let best = cands[0], bs = -1e9, bestExpo = 0
+    let best = cands[0], bs = -1e9, bestExpo = 0, anyHit = false
     const myZ0 = P[2]
     const tStart = performance.now()
     for (let ci = 0; ci < cands.length; ci++) {
@@ -796,6 +818,7 @@ export class Brain {
         if (this.exposedTo(e, x, y, z)) expo += wgt
       }
       const canHit = this.canHitFrom(x, y, z, tx, ty, tz)
+      if (canHit) anyHit = true
       const dTx = hyp(tx - x, ty - y)
       if (ready && aggr > 0.35) {
         if (canHit) s += 6 + 10 * Math.min(1.6, R) * aggr
@@ -833,6 +856,12 @@ export class Brain {
         const mv = this.followTo(spot[0], spot[1], 2)
         return { move: mv, boost: me.energy > 8 }
       }
+    }
+    // nothing nearby gives a shot: go find them instead of waiting behind a wall
+    if (!anyHit && ready && aggr > env("PUSH_AGGR", 2) && !(target as any).ghost) {
+      this.fightGoal = null
+      const mv = this.followTo(tx, ty, Math.min(pref, 30))
+      return { move: mv, boost: me.energy > 40 && dT > 60 }
     }
     this.fightGoal = best
     this.fightGoalAt = t

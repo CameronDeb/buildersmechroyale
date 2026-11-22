@@ -24,6 +24,9 @@ export class World {
   NY = 0
   navH!: Float32Array
   stand!: Uint8Array
+  // nav cell sits on a building/bridge top rather than terrain
+  navSolid!: Uint8Array
+  rSolid!: Uint8Array
   // distance (in cells) to nearest unstandable cell, capped
   open!: Uint8Array
 
@@ -32,6 +35,8 @@ export class World {
   private stamp!: Uint32Array
   private closed!: Uint32Array
   private gen = 0
+  maxClimb = 18
+  pathBudgetMs = 10
   private heapI!: Int32Array
   private heapF!: Float32Array
 
@@ -60,10 +65,11 @@ export class World {
     for (const p of w.prisms) this.rasterPrism(p)
 
     this.surf = new Float32Array(n)
+    this.rSolid = new Uint8Array(n)
     for (let k = 0; k < n; k++) {
       const g = this.ground[k]
       const top = this.sTop[k]
-      if (top > NONE_TOP && !(this.sBase[k] - g >= 9.2)) this.surf[k] = Math.max(top, g)
+      if (top > NONE_TOP && !(this.sBase[k] - g >= 9.2) && top > g + 0.05) { this.surf[k] = top; this.rSolid[k] = 1 }
       else this.surf[k] = g
     }
     this.buildNav()
@@ -177,11 +183,12 @@ export class World {
     const N = NX * NY
     this.navH = new Float32Array(N)
     this.stand = new Uint8Array(N)
-    const nx = this.nx, S = this.surf
+    this.navSolid = new Uint8Array(N)
+    const nx = this.nx, S = this.surf, RS = this.rSolid
     const R = 3
     const offs: number[] = []
     for (let dj = -R; dj <= R; dj++)
-      for (let di = -R; di <= R; di++) if (di * di + dj * dj <= 2.8 * 2.8) offs.push(di, dj)
+      for (let di = -R; di <= R; di++) if (di * di + dj * dj <= 2.8 * 2.8) offs.push(di, dj, Math.hypot(di, dj))
     const margin = 8
     for (let cj = 0; cj < NY; cj++) {
       for (let ci = 0; ci < NX; ci++) {
@@ -189,13 +196,17 @@ export class World {
         const c = cj * NX + ci
         const h = S[j * nx + i]
         this.navH[c] = h
+        this.navSolid[c] = RS[j * nx + i]
         const wx = this.minX + i, wy = this.minY + j
         if (wx < this.bx0 + margin || wx > this.bx1 - margin || wy < this.by0 + margin || wy > this.by1 - margin) continue
         let ok = 1
-        for (let q = 0; q < offs.length; q += 2) {
+        for (let q = 0; q < offs.length; q += 3) {
           const ii = i + offs[q], jj = j + offs[q + 1]
           if (ii < 0 || jj < 0 || ii >= nx || jj >= this.ny) { ok = 0; break }
-          if (S[jj * nx + ii] - h > 1.2) { ok = 0; break }
+          const k = jj * nx + ii
+          const dh = S[k] - h
+          // buildings are walls; terrain only when steeper than the slope limit
+          if (RS[k] ? dh > 1.2 : dh > 1.2 + offs[q + 2] * 1.1) { ok = 0; break }
         }
         this.stand[c] = ok
       }
@@ -275,14 +286,20 @@ export class World {
     const dx = bx - ax, dy = by - ay
     const len = Math.hypot(dx, dy)
     const n = Math.max(1, Math.ceil(len / 1.0))
-    let prevH = this.navH[this.cellOf(ax, ay)]
+    let pc = this.cellOf(ax, ay)
+    let prevH = this.navH[pc]
+    const stepLen = len / n
     for (let s = 1; s <= n; s++) {
       const t = s / n
       const c = this.cellOf(ax + dx * t, ay + dy * t)
       if (this.open[c] < minOpen) return false
       const h = this.navH[c]
-      if (h - prevH > 1.2) return false
+      if (c !== pc) {
+        const lim = this.navSolid[c] || this.navSolid[pc] ? 1.2 : 1.2 + stepLen * 1.1
+        if (h - prevH > lim) return false
+      }
       prevH = h
+      pc = c
     }
     return true
   }
@@ -304,7 +321,7 @@ export class World {
     if (s === goal) return [goal]
     const gen = ++this.gen
     const G = this.g, came = this.came, stamp = this.stamp, closed = this.closed
-    const H = this.navH, stand = this.stand, open = this.open
+    const H = this.navH, stand = this.stand, open = this.open, navSolid = this.navSolid
     const hI = this.heapI, hF = this.heapF
     let hn = 0
     const gci = goal % NX, gcj = Math.floor(goal / NX)
@@ -335,6 +352,7 @@ export class World {
       hI[i] = lastI; hF[i] = lastF
       return top
     }
+    const tStart = performance.now()
     stamp[s] = gen; G[s] = 0; came[s] = -1
     push(s, heur(s))
     let expanded = 0
@@ -350,6 +368,7 @@ export class World {
       const hc = heur(c)
       if (hc < bestH) { bestH = hc; bestC = c }
       if (++expanded > maxExpand) break
+      if ((expanded & 1023) === 0 && performance.now() - tStart > this.pathBudgetMs) break
       const ci = c % NX, cj = (c - ci) / NX
       const hcur = H[c]
       for (let d = 0; d < 8; d++) {
@@ -357,18 +376,45 @@ export class World {
         if (ni < 0 || nj < 0 || ni >= NX || nj >= NY) continue
         const nc = nj * NX + ni
         if (!stand[nc] || closed[nc] === gen) continue
-        if (H[nc] - hcur > 1.2) continue
+        const dh = H[nc] - hcur
+        let climb = 0
+        if (dh > 1.2 && (navSolid[nc] || navSolid[c] || dh > (d < 4 ? 2.2 : 3.1))) {
+          // jump + jets: possible but costs energy and time
+          if (dh > this.maxClimb || d >= 4) continue
+          climb = 4 + dh * 1.5
+        }
         if (d >= 4) {
           const a = cj * NX + ni, b = nj * NX + ci
           if (!stand[a] || !stand[b]) continue
         }
         // mild preference for open space, keeps paths off walls
-        let cost = DC[d] + (open[nc] < 3 ? 0.6 : 0)
+        let cost = DC[d] + (open[nc] < 3 ? 0.6 : 0) + climb
         if (extraCost) cost += extraCost(nc)
         const ng = G[c] + cost
         if (stamp[nc] !== gen || ng < G[nc]) {
           stamp[nc] = gen; G[nc] = ng; came[nc] = c
           push(nc, ng + heur(nc))
+        }
+      }
+      // hop over a strip of wall-adjacent cells (jump or jet), orthogonal only
+      for (let d = 0; d < 4; d++) {
+        const n1 = (cj + DY[d]) * NX + ci + DX[d]
+        if (ci + DX[d] < 0 || cj + DY[d] < 0 || ci + DX[d] >= NX || cj + DY[d] >= NY || stand[n1]) continue
+        let peak = H[n1]
+        for (let k = 2; k <= 4; k++) {
+          const ni = ci + DX[d] * k, nj = cj + DY[d] * k
+          if (ni < 0 || nj < 0 || ni >= NX || nj >= NY) break
+          const nc = nj * NX + ni
+          if (!stand[nc]) { peak = Math.max(peak, H[nc]); continue }
+          if (closed[nc] === gen) break
+          const top = Math.max(peak, H[nc]) - hcur
+          if (top > this.maxClimb) break
+          const ng = G[c] + k + 3 + Math.max(0, top - 1.2) * 1.5
+          if (stamp[nc] !== gen || ng < G[nc]) {
+            stamp[nc] = gen; G[nc] = ng; came[nc] = c
+            push(nc, ng + heur(nc))
+          }
+          break
         }
       }
     }
